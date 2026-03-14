@@ -1,140 +1,147 @@
-name: CloudShield DevSecOps Pipeline
+name: Build and Deploy Board Game App
 
 on:
   push:
     branches:
       - main
-      - master
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        working-directory: board
+
     steps:
 
-      # 1 Checkout Code
-      - name: Checkout Code
-        uses: actions/checkout@v4
+    # 1 Checkout Code
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
 
 
-      # 2 Setup Java
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
+    # 2 Setup Java
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
 
 
-      # 3 Build Maven Project
-      - name: Build with Maven
-        run: mvn clean package -DskipTests
+    # 3 Build Maven Project
+    - name: Build with Maven
+      run: mvn clean package -DskipTests
 
 
-      # 4 Upload JAR Artifact
-      - name: Find JAR file
-        run: echo "JAR_FILE=$(ls target/*.jar | head -n 1)" >> $GITHUB_ENV
-
-      - name: Upload JAR Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: boardgame-jar
-          path: ${{ env.JAR_FILE }}
+    # 4 Find WAR File
+    - name: Find WAR file
+      run: echo "WAR_FILE=$(ls target/*.war | head -n 1)" >> $GITHUB_ENV
 
 
-      # 5 SonarQube Scan
-      - name: SonarQube Code Scan
-        run: |
-          mvn clean verify sonar:sonar \
-          -Dsonar.projectKey=cloudshield-boardgame \
-          -Dsonar.host.url="${{ secrets.SONAR_HOST_URL }}" \
-          -Dsonar.login="${{ secrets.SONAR_TOKEN }}"
+    # 5 Upload Artifact
+    - name: Upload WAR artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: war-file
+        path: board/${{ env.WAR_FILE }}
 
 
-      # 6 Configure AWS
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+    # 6 Configure AWS
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
 
 
-      # 7 Login to Amazon ECR
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
+    # 7 Login to ECR
+    - name: Login to Amazon ECR
+      uses: aws-actions/amazon-ecr-login@v2
 
 
-      # 8 Trivy File System Scan
-      - name: Trivy FS Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
+    # 8 Trivy Filesystem Scan
+    - name: Trivy FS Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: fs
+        scan-ref: .
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+        format: table
 
 
-      # 9 Build Docker Image
-      - name: Build Docker Image
-        run: |
-          IMAGE_TAG=$(date +%s)
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
-          docker build -t ${{ secrets.ECR_REPOSITORY }}:$IMAGE_TAG .
+    # 9 Build Docker Image
+    - name: Build Docker Image
+      run: |
+        IMAGE_TAG=$(date +%s)
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+        docker build -t ${{ secrets.ECR_REPOSITORY }}:$IMAGE_TAG .
 
 
-      # 10 Tag Docker Image
-      - name: Tag Docker Image
-        run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
-          docker tag ${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
-          $ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+    # 10 Tag Docker Image for ECR
+    - name: Tag Docker Image
+      run: |
+        docker tag ${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+        ${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
 
-      # 11 Trivy Image Scan
-      - name: Trivy Image Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: image
-          image-ref: ${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
+    # 11 SonarQube Scan
+    - name: SonarQube Scan
+      uses: sonarsource/sonarqube-scan-action@v2
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
 
-      # 12 Push Image to ECR
-      - name: Push Docker Image
-        run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
-          docker push \
-          $ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
-
-
-      # 13 Update kubeconfig for EKS
-      - name: Update kubeconfig
-        run: |
-          aws eks update-kubeconfig \
-          --name ${{ secrets.EKS_CLUSTER_NAME }} \
-          --region ${{ secrets.AWS_REGION }}
+    # 12 Trivy Image Scan
+    - name: Trivy Image Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: image
+        image-ref: ${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+        ignore-unfixed: true
+        severity: HIGH,CRITICAL
 
 
-      # 14 Apply Kubernetes Manifests
-      - name: Apply Kubernetes Files
-        run: |
-          kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/deployment.yaml -n ${{ secrets.K8S_NAMESPACE }}
-          kubectl apply -f k8s/service.yaml
+    # 13 Push Image to ECR
+    - name: Push Image to ECR
+      run: |
+        docker push \
+        ${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
 
-      # 15 Deploy Latest Image to EKS
-      - name: Deploy to EKS
-        run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    # 14 Install kubectl
+    - name: Install kubectl
+      run: |
+        curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
 
-          kubectl set image deployment/boardgame-deployment \
-          boardgame-container=$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
-          -n ${{ secrets.K8S_NAMESPACE }}
 
-          kubectl rollout status deployment/boardgame-deployment \
-          -n ${{ secrets.K8S_NAMESPACE }} --timeout=200s
+    # 15 Update kubeconfig for EKS
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig \
+        --name ${{ secrets.EKS_CLUSTER_NAME }} \
+        --region ${{ secrets.AWS_REGION }}
+
+
+    # 16 Deploy Kubernetes Manifests
+    - name: Apply Kubernetes manifests
+      run: |
+        kubectl apply -f ../k8s/namespace.yaml
+        kubectl apply -f ../k8s/deployment.yaml -n board
+        kubectl apply -f ../k8s/service.yaml -n board
+
+
+    # 17 Update Deployment Image
+    - name: Deploy to EKS
+      run: |
+        kubectl set image deployment/board \
+        board=${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+        -n board
+
+        kubectl rollout status deployment/board \
+        -n board --timeout=200s
