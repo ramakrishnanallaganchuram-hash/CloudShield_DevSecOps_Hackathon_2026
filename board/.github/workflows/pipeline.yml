@@ -1,0 +1,119 @@
+name: Build and Deploy Board Game App
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: board
+
+    steps:
+
+    # Checkout repository
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # Setup Java
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    # Build project
+    - name: Build with Maven
+      run: mvn clean package -DskipTests
+
+    # Configure AWS credentials
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    # Login to Amazon ECR
+    - name: Login to Amazon ECR
+      uses: aws-actions/amazon-ecr-login@v2
+
+    # Trivy filesystem scan
+    - name: Trivy FS Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: fs
+        scan-ref: .
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+
+    # Build Docker image
+    - name: Build Docker Image
+      run: |
+        IMAGE_TAG=$(date +%s)
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+        docker build -t ${{ secrets.ECR_REPOSITORY }}:$IMAGE_TAG .
+
+    # Tag Docker image for ECR
+    - name: Tag Docker Image
+      run: |
+        docker tag ${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+        ${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+    # SonarQube scan
+    - name: SonarQube Scan
+      uses: sonarsource/sonarqube-scan-action@v2
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+    # Trivy Image Scan
+    - name: Trivy Image Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: image
+        image-ref: ${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+
+    # Push Docker Image to ECR
+    - name: Push Image to ECR
+      run: |
+        docker push \
+        ${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+    # Install kubectl
+    - name: Install kubectl
+      run: |
+        curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+
+    # Update kubeconfig for EKS
+    - name: Configure EKS
+      run: |
+        aws eks update-kubeconfig \
+        --name ${{ secrets.EKS_CLUSTER_NAME }} \
+        --region ${{ secrets.AWS_REGION }}
+
+    # Apply Kubernetes manifests
+    - name: Deploy Kubernetes manifests
+      run: |
+        kubectl apply -f k8s/namespace.yaml
+        kubectl apply -f k8s/Deployment.yaml -n cloudshield
+        kubectl apply -f k8s/Service.yaml -n cloudshield
+
+    # Update deployment image
+    - name: Update Deployment Image
+      run: |
+        kubectl set image deployment/boardgame \
+        boardgame=${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+        -n cloudshield
+
+        kubectl rollout status deployment/boardgame \
+        -n cloudshield --timeout=200s
