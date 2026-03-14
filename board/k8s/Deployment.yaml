@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: boardgame-deployment
+  labels:
+    app: boardgame
+
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: boardgame
+
+  template:
+    metadata:
+      labels:
+        app: boardgame
+
+    spec:
+      containers:
+      - name: boardgame-container
+        image: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/ECR_REPOSITORY:latest
+        ports:
+        - containerPort: 8080
+
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 10
