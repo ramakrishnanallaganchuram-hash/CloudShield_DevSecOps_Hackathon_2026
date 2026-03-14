@@ -1,7 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: boardgame-deployment
+  name: boardgame
+  namespace: cloudshield
   labels:
     app: boardgame
 
@@ -19,8 +20,10 @@ spec:
 
     spec:
       containers:
-      - name: boardgame-container
-        image: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/ECR_REPOSITORY:latest
+      - name: boardgame
+        image: placeholder-image
+        imagePullPolicy: Always
+
         ports:
         - containerPort: 8080
 
